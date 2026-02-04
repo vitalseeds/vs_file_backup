@@ -3,6 +3,7 @@
 # dependencies = ["platformdirs"]
 # ///
 
+import argparse
 import logging
 import shutil
 import tomllib
@@ -117,11 +118,23 @@ def setup_logging(destination: Path) -> None:
     log.setLevel(logging.INFO)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Back up files per config schedule")
+    parser.add_argument(
+        "--force", action="store_true", help="Force backup regardless of schedule"
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
     config = load_config()
     destination = Path(config["backup_destination"])
     setup_logging(destination)
     now = datetime.now()
+
+    if args.force:
+        log.info("Force flag set — overriding schedule checks")
 
     for entry in config["files"]:
         source = Path(entry["path"])
@@ -143,9 +156,12 @@ def main() -> None:
         backup_dir = get_backup_dir(destination, source)
         backups = existing_backups(backup_dir, source.name)
 
-        if needs_backup(backups, frequency, now):
+        if args.force or needs_backup(backups, frequency, now):
             backup_dir.mkdir(parents=True, exist_ok=True)
             dest_file = backup_dir / backup_filename(source, now)
+            if dest_file.exists():
+                log.info("Replacing existing backup: %s", dest_file.name)
+                print(f"  Replacing existing backup: {dest_file.name}")
             try:
                 shutil.copy2(source, dest_file)
             except OSError as e:
