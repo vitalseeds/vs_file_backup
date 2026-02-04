@@ -24,8 +24,13 @@ INTERVALS = {
     "weekly": timedelta(weeks=1),
 }
 
+DEFAULT_BACKUP_FORMAT = "%a_%H%M_%d-%m-%Y"
+
 SAMPLE_CONFIG = """\
 backup_destination = "/path/to/backups"
+# strftime format for backup filename prefix (default: "%a_%H%M_%d-%m-%Y")
+# e.g. "%d-%m-%Y_%H%M" -> 21-02-2026_1602_filename.ext
+# backup_format = "%a_%H%M_%d-%m-%Y"
 
 [[files]]
 path = "/path/to/important_file.txt"
@@ -52,21 +57,15 @@ def load_config() -> dict:
         return tomllib.load(f)
 
 
-def backup_filename(source: Path, now: datetime) -> str:
+def backup_filename(source: Path, now: datetime, fmt: str = DEFAULT_BACKUP_FORMAT) -> str:
     """Build backup name: e.g. mon_1602_21-02-2026_filename.ext"""
-    weekday = now.strftime("%a").lower()
-    time_str = now.strftime("%H%M")
-    date_str = now.strftime("%d-%m-%Y")
-    return f"{weekday}_{time_str}_{date_str}_{source.name}"
+    return f"{now.strftime(fmt)}_{source.name}"
 
 
-def parse_backup_datetime(filename: str) -> datetime | None:
-    """Parse datetime from a backup filename."""
-    parts = filename.split("_", 3)
-    if len(parts) < 4:
-        return None
+def parse_backup_datetime(date_prefix: str, fmt: str = DEFAULT_BACKUP_FORMAT) -> datetime | None:
+    """Parse datetime from the date prefix of a backup filename."""
     try:
-        return datetime.strptime(f"{parts[2]}_{parts[1]}", "%d-%m-%Y_%H%M")
+        return datetime.strptime(date_prefix, fmt)
     except ValueError:
         return None
 
@@ -76,19 +75,21 @@ def get_backup_dir(destination: Path, source: Path) -> Path:
     return destination / source.stem.replace(" ", "_")
 
 
-def existing_backups(backup_dir: Path, source_name: str) -> list[tuple[Path, datetime]]:
+def existing_backups(
+    backup_dir: Path, source_name: str, fmt: str = DEFAULT_BACKUP_FORMAT
+) -> list[tuple[Path, datetime]]:
     """Return existing backups for a source file, newest first."""
     backups = []
     if not backup_dir.exists():
         return backups
+    suffix = f"_{source_name}"
     for f in backup_dir.iterdir():
-        if not f.is_file():
+        if not f.is_file() or not f.name.endswith(suffix):
             continue
-        parts = f.name.split("_", 3)
-        if len(parts) == 4 and parts[3] == source_name:
-            dt = parse_backup_datetime(f.name)
-            if dt:
-                backups.append((f, dt))
+        date_prefix = f.name[: -len(suffix)]
+        dt = parse_backup_datetime(date_prefix, fmt)
+        if dt:
+            backups.append((f, dt))
     backups.sort(key=lambda x: x[1], reverse=True)
     return backups
 
@@ -130,6 +131,7 @@ def main() -> None:
     args = parse_args()
     config = load_config()
     destination = Path(config["backup_destination"])
+    backup_fmt = config.get("backup_format", DEFAULT_BACKUP_FORMAT)
     setup_logging(destination)
     now = datetime.now()
 
@@ -154,11 +156,11 @@ def main() -> None:
             continue
 
         backup_dir = get_backup_dir(destination, source)
-        backups = existing_backups(backup_dir, source.name)
+        backups = existing_backups(backup_dir, source.name, backup_fmt)
 
         if args.force or needs_backup(backups, frequency, now):
             backup_dir.mkdir(parents=True, exist_ok=True)
-            dest_file = backup_dir / backup_filename(source, now)
+            dest_file = backup_dir / backup_filename(source, now, backup_fmt)
             if dest_file.exists():
                 log.info("Replacing existing backup: %s", dest_file.name)
                 print(f"  Replacing existing backup: {dest_file.name}")
@@ -173,7 +175,7 @@ def main() -> None:
             log.info("Backed up: %s -> %s", source.name, dest_file)
             print(f"Backed up: {source.name} -> {dest_file}")
 
-            backups = existing_backups(backup_dir, source.name)
+            backups = existing_backups(backup_dir, source.name, backup_fmt)
             prune_backups(backups, copies)
         else:
             log.info("Skipped (recent backup exists): %s", source.name)
